@@ -10,6 +10,7 @@ import (
 	"google.golang.org/appengine"
 	//"google.golang.org/appengine/blobstore"
 	"google.golang.org/appengine/datastore"
+	"google.golang.org/appengine/log"
 	"google.golang.org/appengine/memcache"
 
 	"github.com/unrolled/render"
@@ -30,6 +31,10 @@ import (
 // </html>
 // `
 
+//var (
+//	form = template.Must(template.New("root").Parse(formImageHTML))
+//)
+
 const (
 	HUNT_ENTITY     = "HUNT"
 	CLUE_ENTITY     = "CLUE"
@@ -38,14 +43,8 @@ const (
 	ANSWER_ENTITY   = "ANSWER"
 )
 
-var (
-	R = render.New()
-
-//	form = template.Must(template.New("root").Parse(formImageHTML))
-)
-
 func getAncestorKey(ctx context.Context) *datastore.Key {
-	return datastore.NewKey(ctx, "GDGTH", "default", 0, nil)
+	return datastore.NewKey(ctx, "GDGTH_debug", "default", 0, nil)
 }
 
 func init() {
@@ -55,10 +54,6 @@ func init() {
 	goji.Get("/api/hunt/:hid", getHuntHandler)
 	goji.Delete("/api/hunt", delAllHuntsHandler)
 	goji.Delete("/api/hunt/:hid", delHuntHandler)
-	goji.Head("/api/memcache/flush", cacheFlushHandler)
-
-	//goji.Post("/api/hunt/:"+HUNT_ID_PARAM+"/clue", newClueHandler)
-	//goji.Delete("/api/hunt/:"+HUNT_ID_PARAM+"/clue", delAllCluesHandler)
 
 	// goji.Get("/api/image", getFormImgHandler)
 	// goji.Post("/api/image", uploadImgHandler)
@@ -71,154 +66,141 @@ func newHuntHandler(w http.ResponseWriter, req *http.Request) {
 
 	var hunt Hunt
 
-	err := json.NewDecoder(req.Body).Decode(&hunt)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	hunt_key, err := datastore.Put(ctx, datastore.NewKey(ctx, HUNT_ENTITY, hunt.Id, 0, getAncestorKey(ctx)), &hunt)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	for _, clue := range hunt.Clues {
-		clue_key, err := datastore.Put(ctx, datastore.NewKey(ctx, CLUE_ENTITY, clue.Id, 0, hunt_key), &clue)
+	err := datastore.RunInTransaction(ctx, func(ctx context.Context) error {
+		err := json.NewDecoder(req.Body).Decode(&hunt)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			return err
 		}
 
-		for _, tag := range clue.Tags {
-			_, err := datastore.Put(ctx, datastore.NewKey(ctx, TAG_ENTITY, tag.Id, 0, clue_key), &tag)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
+		hunt_key, err := datastore.Put(ctx, datastore.NewKey(ctx, HUNT_ENTITY, hunt.Id, 0, getAncestorKey(ctx)), &hunt)
+		if err != nil {
+			return err
 		}
 
-		for _, question := range clue.Questions {
-			question_key, err := datastore.Put(ctx, datastore.NewIncompleteKey(ctx, QUESTION_ENTITY, clue_key), &question)
+		for _, clue := range hunt.Clues {
+			clue_key, err := datastore.Put(ctx, datastore.NewKey(ctx, CLUE_ENTITY, clue.Id, 0, hunt_key), &clue)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+				return err
 			}
 
-			for _, answer := range question.Answers {
-				_, err := datastore.Put(ctx, datastore.NewIncompleteKey(ctx, ANSWER_ENTITY, question_key), &answer)
+			for _, tag := range clue.Tags {
+				_, err := datastore.Put(ctx, datastore.NewKey(ctx, TAG_ENTITY, tag.Id, 0, clue_key), &tag)
 				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
+					return err
 				}
 			}
 
+			for _, question := range clue.Questions {
+				question_key, err := datastore.Put(ctx, datastore.NewIncompleteKey(ctx, QUESTION_ENTITY, clue_key), &question)
+				if err != nil {
+					return err
+				}
+
+				for _, answer := range question.Answers {
+					_, err := datastore.Put(ctx, datastore.NewIncompleteKey(ctx, ANSWER_ENTITY, question_key), &answer)
+					if err != nil {
+						return err
+					}
+				}
+			}
 		}
+
+		return memcache.Flush(ctx)
+	}, nil)
+
+	if err != nil {
+		log.Errorf(ctx, err.Error())
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-
-	memcache.Flush(ctx)
-
-	R.JSON(w, http.StatusCreated, hunt)
 }
 
 func getAllHuntsHandler(w http.ResponseWriter, req *http.Request) {
 	ctx := appengine.NewContext(req)
 
-	memcache_key := "ALLHUNTS_" + req.URL.String()
+	memcache_key := req.URL.String()
 
 	var hunts []Hunt
 
 	_, err := memcache.JSON.Get(ctx, memcache_key, &hunts)
-	if err == nil {
-		R.JSON(w, http.StatusFound, hunts)
-		return
-	}
-
-	order := "Id"
-	page := 0
-	per_page := 10
-
-	opt := req.URL.Query().Get("order")
-	if opt != "" {
-		order = opt
-	}
-
-	opt = req.URL.Query().Get("page")
-	if opt != "" {
-		page, err = strconv.Atoi(opt)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-
-	opt = req.URL.Query().Get("per_page")
-	if opt != "" {
-		per_page, err = strconv.Atoi(opt)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-
-	offset := page * per_page
-
-	hunts_query := datastore.NewQuery(HUNT_ENTITY).Ancestor(getAncestorKey(ctx)).Limit(per_page).Offset(offset).Order(order)
-
-	hunts_key, err := hunts_query.GetAll(ctx, &hunts)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+		err = datastore.RunInTransaction(ctx, func(ctx context.Context) error {
+			order := "Id"
+			page := 0
+			per_page := 10
 
-	for hunt_id, hunt_key := range hunts_key {
-		clues_query := datastore.NewQuery(CLUE_ENTITY).Ancestor(hunt_key)
-
-		clues_key, err := clues_query.GetAll(ctx, &(hunts[hunt_id].Clues))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		for clue_id, clue_key := range clues_key {
-			tags_query := datastore.NewQuery(TAG_ENTITY).Ancestor(clue_key)
-			_, err := tags_query.GetAll(ctx, &(hunts[hunt_id].Clues[clue_id].Tags))
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+			opt := req.URL.Query().Get("order")
+			if opt != "" {
+				order = opt
 			}
 
-			questions_query := datastore.NewQuery(QUESTION_ENTITY).Ancestor(clue_key)
-			questions_key, err := questions_query.GetAll(ctx, &(hunts[hunt_id].Clues[clue_id].Questions))
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			for question_id, question_key := range questions_key {
-				answers_query := datastore.NewQuery(ANSWER_ENTITY).Ancestor(question_key)
-				_, err := answers_query.GetAll(ctx, &(hunts[hunt_id].Clues[clue_id].Questions[question_id].Answers))
+			opt = req.URL.Query().Get("page")
+			if opt != "" {
+				page, err = strconv.Atoi(opt)
 				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
+					return err
+				}
+			}
+
+			opt = req.URL.Query().Get("per_page")
+			if opt != "" {
+				per_page, err = strconv.Atoi(opt)
+				if err != nil {
+					return err
+				}
+			}
+
+			offset := page * per_page
+
+			hunts_query := datastore.NewQuery(HUNT_ENTITY).Ancestor(getAncestorKey(ctx)).Limit(per_page).Offset(offset).Order(order)
+
+			hunt_keys, err := hunts_query.GetAll(ctx, &hunts)
+			if err != nil {
+				return err
+			}
+
+			for hunt_id, hunt_key := range hunt_keys {
+				clues_query := datastore.NewQuery(CLUE_ENTITY).Ancestor(hunt_key)
+
+				clue_keys, err := clues_query.GetAll(ctx, &(hunts[hunt_id].Clues))
+				if err != nil {
+					return err
 				}
 
+				for clue_id, clue_key := range clue_keys {
+					tags_query := datastore.NewQuery(TAG_ENTITY).Ancestor(clue_key)
+					_, err := tags_query.GetAll(ctx, &(hunts[hunt_id].Clues[clue_id].Tags))
+					if err != nil {
+						return err
+					}
+
+					questions_query := datastore.NewQuery(QUESTION_ENTITY).Ancestor(clue_key)
+					question_keys, err := questions_query.GetAll(ctx, &(hunts[hunt_id].Clues[clue_id].Questions))
+					if err != nil {
+						return err
+					}
+
+					for question_id, question_key := range question_keys {
+						answers_query := datastore.NewQuery(ANSWER_ENTITY).Ancestor(question_key)
+						_, err := answers_query.GetAll(ctx, &(hunts[hunt_id].Clues[clue_id].Questions[question_id].Answers))
+						if err != nil {
+							return err
+						}
+					}
+				}
 			}
-		}
+
+			return memcache.JSON.Add(ctx, &memcache.Item{Key: memcache_key, Object: hunts})
+		}, nil)
 	}
 
-	mem_item := &memcache.Item{
-		Key:    memcache_key,
-		Object: hunts,
-	}
-
-	err = memcache.JSON.Add(ctx, mem_item)
 	if err != nil {
+		log.Errorf(ctx, err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	R.JSON(w, http.StatusOK, hunts)
+	render.New().JSON(w, http.StatusOK, hunts)
 }
 
 func getHuntHandler(c web.C, w http.ResponseWriter, req *http.Request) {
@@ -226,153 +208,196 @@ func getHuntHandler(c web.C, w http.ResponseWriter, req *http.Request) {
 
 	memcache_key := req.URL.String()
 
-	hunt_id := c.URLParams["hid"]
-	hunt_key := datastore.NewKey(ctx, HUNT_ENTITY, hunt_id, 0, getAncestorKey(ctx))
-
 	var hunt Hunt
 
 	_, err := memcache.JSON.Get(ctx, memcache_key, &hunt)
-	if err == nil {
-		R.JSON(w, http.StatusFound, hunt)
-		return
-	}
-
-	err = datastore.Get(ctx, hunt_key, &hunt)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+		err = datastore.RunInTransaction(ctx, func(ctx context.Context) error {
+			hunt_id := c.URLParams["hid"]
+			hunt_key := datastore.NewKey(ctx, HUNT_ENTITY, hunt_id, 0, getAncestorKey(ctx))
 
-	clues_query := datastore.NewQuery(CLUE_ENTITY).Ancestor(hunt_key)
-
-	clues_key, err := clues_query.GetAll(ctx, &(hunt.Clues))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	for clue_id, clue_key := range clues_key {
-		tags_query := datastore.NewQuery(TAG_ENTITY).Ancestor(clue_key)
-		_, err := tags_query.GetAll(ctx, &(hunt.Clues[clue_id].Tags))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		questions_query := datastore.NewQuery(QUESTION_ENTITY).Ancestor(clue_key)
-		questions_key, err := questions_query.GetAll(ctx, &(hunt.Clues[clue_id].Questions))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		for question_id, question_key := range questions_key {
-			answers_query := datastore.NewQuery(ANSWER_ENTITY).Ancestor(question_key)
-			_, err := answers_query.GetAll(ctx, &(hunt.Clues[clue_id].Questions[question_id].Answers))
+			err = datastore.Get(ctx, hunt_key, &hunt)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+				return err
 			}
-		}
+
+			clues_query := datastore.NewQuery(CLUE_ENTITY).Ancestor(hunt_key)
+
+			clue_keys, err := clues_query.GetAll(ctx, &(hunt.Clues))
+			if err != nil {
+				return err
+			}
+
+			for clue_id, clue_key := range clue_keys {
+				tags_query := datastore.NewQuery(TAG_ENTITY).Ancestor(clue_key)
+				_, err := tags_query.GetAll(ctx, &(hunt.Clues[clue_id].Tags))
+				if err != nil {
+					return err
+				}
+
+				questions_query := datastore.NewQuery(QUESTION_ENTITY).Ancestor(clue_key)
+				question_keys, err := questions_query.GetAll(ctx, &(hunt.Clues[clue_id].Questions))
+				if err != nil {
+					return err
+				}
+
+				for question_id, question_key := range question_keys {
+					answers_query := datastore.NewQuery(ANSWER_ENTITY).Ancestor(question_key)
+					_, err := answers_query.GetAll(ctx, &(hunt.Clues[clue_id].Questions[question_id].Answers))
+					if err != nil {
+						return err
+					}
+				}
+			}
+
+			return memcache.JSON.Add(ctx, &memcache.Item{Key: memcache_key, Object: hunt})
+		}, nil)
 	}
 
-	mem_item := &memcache.Item{
-		Key:    memcache_key,
-		Object: hunt,
-	}
-
-	err = memcache.JSON.Add(ctx, mem_item)
 	if err != nil {
+		log.Errorf(ctx, err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	R.JSON(w, http.StatusOK, hunt)
+	render.New().JSON(w, http.StatusOK, hunt)
 }
 
 func delAllHuntsHandler(w http.ResponseWriter, req *http.Request) {
 	ctx := appengine.NewContext(req)
 
-	hunts_key, err := datastore.NewQuery(HUNT_ENTITY).Ancestor(getAncestorKey(ctx)).KeysOnly().GetAll(ctx, nil)
+	err := datastore.RunInTransaction(ctx, func(ctx context.Context) error {
+		hunt_keys, err := datastore.NewQuery(HUNT_ENTITY).Ancestor(getAncestorKey(ctx)).KeysOnly().GetAll(ctx, nil)
+		if err != nil {
+			return err
+		}
+
+		err = datastore.DeleteMulti(ctx, hunt_keys)
+		if err != nil {
+			return err
+		}
+
+		for _, hunt_key := range hunt_keys {
+			clue_keys, err := datastore.NewQuery(CLUE_ENTITY).Ancestor(hunt_key).KeysOnly().GetAll(ctx, nil)
+			if err != nil {
+				return err
+			}
+
+			err = datastore.DeleteMulti(ctx, clue_keys)
+			if err != nil {
+				return err
+			}
+
+			for _, clue_key := range clue_keys {
+				tag_keys, err := datastore.NewQuery(TAG_ENTITY).Ancestor(clue_key).KeysOnly().GetAll(ctx, nil)
+				if err != nil {
+					return err
+				}
+
+				err = datastore.DeleteMulti(ctx, tag_keys)
+				if err != nil {
+					return err
+				}
+
+				question_keys, err := datastore.NewQuery(QUESTION_ENTITY).Ancestor(clue_key).KeysOnly().GetAll(ctx, nil)
+				if err != nil {
+					return err
+				}
+
+				err = datastore.DeleteMulti(ctx, question_keys)
+				if err != nil {
+					return err
+				}
+
+				for _, question_key := range question_keys {
+					answer_keys, err := datastore.NewQuery(ANSWER_ENTITY).Ancestor(question_key).KeysOnly().GetAll(ctx, nil)
+					if err != nil {
+						return err
+					}
+
+					err = datastore.DeleteMulti(ctx, answer_keys)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
+
+		return memcache.Flush(ctx)
+	}, nil)
+
 	if err != nil {
+		log.Errorf(ctx, err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	err = datastore.DeleteMulti(ctx, hunts_key)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	//TODO cancellare campi relativi
-
-	memcache.Flush(ctx)
 }
 
 func delHuntHandler(c web.C, w http.ResponseWriter, req *http.Request) {
 	ctx := appengine.NewContext(req)
 
-	hunt_id := c.URLParams["hid"]
-	hunt_key := datastore.NewKey(ctx, HUNT_ENTITY, hunt_id, 0, getAncestorKey(ctx))
+	err := datastore.RunInTransaction(ctx, func(ctx context.Context) error {
+		hunt_id := c.URLParams["hid"]
+		hunt_key := datastore.NewKey(ctx, HUNT_ENTITY, hunt_id, 0, getAncestorKey(ctx))
 
-	err := datastore.Delete(ctx, hunt_key)
+		err := datastore.Delete(ctx, hunt_key)
+		if err != nil {
+			return err
+		}
+
+		clue_keys, err := datastore.NewQuery(CLUE_ENTITY).Ancestor(hunt_key).KeysOnly().GetAll(ctx, nil)
+		if err != nil {
+			return err
+		}
+
+		err = datastore.DeleteMulti(ctx, clue_keys)
+		if err != nil {
+			return err
+		}
+
+		for _, clue_key := range clue_keys {
+			tag_keys, err := datastore.NewQuery(TAG_ENTITY).Ancestor(clue_key).KeysOnly().GetAll(ctx, nil)
+			if err != nil {
+				return err
+			}
+
+			err = datastore.DeleteMulti(ctx, tag_keys)
+			if err != nil {
+				return err
+			}
+
+			question_keys, err := datastore.NewQuery(QUESTION_ENTITY).Ancestor(clue_key).KeysOnly().GetAll(ctx, nil)
+			if err != nil {
+				return err
+			}
+
+			err = datastore.DeleteMulti(ctx, question_keys)
+			if err != nil {
+				return err
+			}
+
+			for _, question_key := range question_keys {
+				answer_keys, err := datastore.NewQuery(ANSWER_ENTITY).Ancestor(question_key).KeysOnly().GetAll(ctx, nil)
+				if err != nil {
+					return err
+				}
+
+				err = datastore.DeleteMulti(ctx, answer_keys)
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		return memcache.Flush(ctx)
+	}, nil)
+
 	if err != nil {
+		log.Errorf(ctx, err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	//TODO cancellare campi relativi
-
-	memcache.Flush(ctx)
 }
-
-// func newClueHandler(c web.C, w http.ResponseWriter, req *http.Request) {
-// 	ctx := appengine.NewContext(req)
-
-// 	var clue Clue
-
-// 	err := json.NewDecoder(req.Body).Decode(&clue)
-// 	if err != nil {
-// 		http.Error(w, err.Error(), http.StatusInternalServerError)
-// 		return
-// 	}
-
-// 	hkey := datastore.NewKey(ctx, HUNT_ENTITY, c.URLParams[HUNT_ID_PARAM], 0, getAncestorKey(ctx))
-// 	ckey := datastore.NewKey(ctx, CLUE_ENTITY, clue.Id, 0, hkey)
-
-// 	_, err = datastore.Put(ctx, ckey, &clue)
-// 	if err != nil {
-// 		http.Error(w, err.Error(), http.StatusInternalServerError)
-// 		return
-// 	}
-
-// 	R.JSON(w, http.StatusCreated, clue)
-// }
-
-// func delAllCluesHandler(c web.C, w http.ResponseWriter, req *http.Request) {
-// 	ctx := appengine.NewContext(req)
-
-// 	var hunt Hunt
-
-// 	key := datastore.NewKey(ctx, HUNT_ENTITY, c.URLParams[HUNT_ID_PARAM], 0, getAncestorKey(ctx))
-
-// 	err := datastore.Get(ctx, key, &hunt)
-// 	if err != nil {
-// 		http.Error(w, err.Error(), http.StatusInternalServerError)
-// 		return
-// 	}
-
-// 	hunt.Clues = nil
-
-// 	_, err = datastore.Put(ctx, key, &hunt)
-// 	if err != nil {
-// 		http.Error(w, err.Error(), http.StatusInternalServerError)
-// 		return
-// 	}
-
-// 	R.JSON(w, http.StatusCreated, hunt)
-// }
 
 // func getFormImgHandler(c web.C, w http.ResponseWriter, req *http.Request) {
 // 	ctx := appengine.NewContext(req)
@@ -399,9 +424,3 @@ func delHuntHandler(c web.C, w http.ResponseWriter, req *http.Request) {
 // 		return
 // 	}
 // }
-
-func cacheFlushHandler(w http.ResponseWriter, req *http.Request) {
-	ctx := appengine.NewContext(req)
-
-	memcache.Flush(ctx)
-}
