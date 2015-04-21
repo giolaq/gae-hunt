@@ -2,7 +2,6 @@ package hunt
 
 import (
 	"encoding/json"
-	//"fmt"
 	//"html/template"
 	"net/http"
 	"strconv"
@@ -43,10 +42,6 @@ const (
 	ANSWER_ENTITY   = "ANSWER"
 )
 
-func getAncestorKey(ctx context.Context) *datastore.Key {
-	return datastore.NewKey(ctx, "GDGTH_debug", "default", 0, nil)
-}
-
 func init() {
 	goji.Post("/api/hunt", newHuntHandler)
 	goji.Put("/api/hunt", newHuntHandler)
@@ -61,6 +56,10 @@ func init() {
 	goji.Serve()
 }
 
+func getMainDatastoreKey(ctx context.Context) *datastore.Key {
+	return datastore.NewKey(ctx, "GDGTH_debug", "default", 0, nil)
+}
+
 func newHuntHandler(w http.ResponseWriter, req *http.Request) {
 	ctx := appengine.NewContext(req)
 
@@ -72,7 +71,7 @@ func newHuntHandler(w http.ResponseWriter, req *http.Request) {
 			return err
 		}
 
-		hunt_key, err := datastore.Put(ctx, datastore.NewKey(ctx, HUNT_ENTITY, hunt.Id, 0, getAncestorKey(ctx)), &hunt)
+		hunt_key, err := datastore.Put(ctx, datastore.NewKey(ctx, HUNT_ENTITY, hunt.Id, 0, getMainDatastoreKey(ctx)), &hunt)
 		if err != nil {
 			return err
 		}
@@ -152,7 +151,7 @@ func getAllHuntsHandler(w http.ResponseWriter, req *http.Request) {
 
 			offset := page * per_page
 
-			hunts_query := datastore.NewQuery(HUNT_ENTITY).Ancestor(getAncestorKey(ctx)).Limit(per_page).Offset(offset).Order(order)
+			hunts_query := datastore.NewQuery(HUNT_ENTITY).Ancestor(getMainDatastoreKey(ctx)).Limit(per_page).Offset(offset).Order(order)
 
 			hunt_keys, err := hunts_query.GetAll(ctx, &hunts)
 			if err != nil {
@@ -214,7 +213,7 @@ func getHuntHandler(c web.C, w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		err = datastore.RunInTransaction(ctx, func(ctx context.Context) error {
 			hunt_id := c.URLParams["hid"]
-			hunt_key := datastore.NewKey(ctx, HUNT_ENTITY, hunt_id, 0, getAncestorKey(ctx))
+			hunt_key := datastore.NewKey(ctx, HUNT_ENTITY, hunt_id, 0, getMainDatastoreKey(ctx))
 
 			err = datastore.Get(ctx, hunt_key, &hunt)
 			if err != nil {
@@ -267,7 +266,7 @@ func delAllHuntsHandler(w http.ResponseWriter, req *http.Request) {
 	ctx := appengine.NewContext(req)
 
 	err := datastore.RunInTransaction(ctx, func(ctx context.Context) error {
-		hunt_keys, err := datastore.NewQuery(HUNT_ENTITY).Ancestor(getAncestorKey(ctx)).KeysOnly().GetAll(ctx, nil)
+		hunt_keys, err := datastore.NewQuery(HUNT_ENTITY).Ancestor(getMainDatastoreKey(ctx)).KeysOnly().GetAll(ctx, nil)
 		if err != nil {
 			return err
 		}
@@ -338,7 +337,7 @@ func delHuntHandler(c web.C, w http.ResponseWriter, req *http.Request) {
 
 	err := datastore.RunInTransaction(ctx, func(ctx context.Context) error {
 		hunt_id := c.URLParams["hid"]
-		hunt_key := datastore.NewKey(ctx, HUNT_ENTITY, hunt_id, 0, getAncestorKey(ctx))
+		hunt_key := datastore.NewKey(ctx, HUNT_ENTITY, hunt_id, 0, getMainDatastoreKey(ctx))
 
 		err := datastore.Delete(ctx, hunt_key)
 		if err != nil {
