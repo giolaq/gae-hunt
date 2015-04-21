@@ -2,13 +2,15 @@ package hunt
 
 import (
 	"encoding/json"
-	"html/template"
+	//"fmt"
+	//"html/template"
 	"net/http"
 	"strconv"
 
 	"google.golang.org/appengine"
 	//"google.golang.org/appengine/blobstore"
 	"google.golang.org/appengine/datastore"
+	"google.golang.org/appengine/memcache"
 
 	"github.com/unrolled/render"
 	"github.com/zenazn/goji"
@@ -17,16 +19,16 @@ import (
 	"golang.org/x/net/context"
 )
 
-const formImageHTML = `
-<html>
-        <body>
-                <form action="{{.}}" method="POST" enctype="multipart/form-data">
-                        <input type="file" name="file"><br>
-                        <input type="submit" name="submit" value="Submit">
-                </form>
-        </body>
-</html>
-`
+// const formImageHTML = `
+// <html>
+//         <body>
+//                 <form action="{{.}}" method="POST" enctype="multipart/form-data">
+//                         <input type="file" name="file"><br>
+//                         <input type="submit" name="submit" value="Submit">
+//                 </form>
+//         </body>
+// </html>
+// `
 
 const (
 	HUNT_ENTITY     = "HUNT"
@@ -37,8 +39,9 @@ const (
 )
 
 var (
-	R    = render.New()
-	form = template.Must(template.New("root").Parse(formImageHTML))
+	R = render.New()
+
+//	form = template.Must(template.New("root").Parse(formImageHTML))
 )
 
 func getAncestorKey(ctx context.Context) *datastore.Key {
@@ -52,6 +55,7 @@ func init() {
 	goji.Get("/api/hunt/:hid", getHuntHandler)
 	goji.Delete("/api/hunt", delAllHuntsHandler)
 	goji.Delete("/api/hunt/:hid", delHuntHandler)
+	goji.Head("/api/memcache/flush", cacheFlushHandler)
 
 	//goji.Post("/api/hunt/:"+HUNT_ID_PARAM+"/clue", newClueHandler)
 	//goji.Delete("/api/hunt/:"+HUNT_ID_PARAM+"/clue", delAllCluesHandler)
@@ -112,14 +116,23 @@ func newHuntHandler(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	memcache.Flush(ctx)
+
 	R.JSON(w, http.StatusCreated, hunt)
 }
 
 func getAllHuntsHandler(w http.ResponseWriter, req *http.Request) {
 	ctx := appengine.NewContext(req)
 
+	memcache_key := "ALLHUNTS_" + req.URL.String()
+
 	var hunts []Hunt
-	var err error
+
+	_, err := memcache.JSON.Get(ctx, memcache_key, &hunts)
+	if err == nil {
+		R.JSON(w, http.StatusFound, hunts)
+		return
+	}
 
 	order := "Id"
 	page := 0
@@ -194,18 +207,37 @@ func getAllHuntsHandler(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	mem_item := &memcache.Item{
+		Key:    memcache_key,
+		Object: hunts,
+	}
+
+	err = memcache.JSON.Add(ctx, mem_item)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	R.JSON(w, http.StatusOK, hunts)
 }
 
 func getHuntHandler(c web.C, w http.ResponseWriter, req *http.Request) {
 	ctx := appengine.NewContext(req)
 
-	var hunt Hunt
+	memcache_key := req.URL.String()
 
 	hunt_id := c.URLParams["hid"]
 	hunt_key := datastore.NewKey(ctx, HUNT_ENTITY, hunt_id, 0, getAncestorKey(ctx))
 
-	err := datastore.Get(ctx, hunt_key, &hunt)
+	var hunt Hunt
+
+	_, err := memcache.JSON.Get(ctx, memcache_key, &hunt)
+	if err == nil {
+		R.JSON(w, http.StatusFound, hunt)
+		return
+	}
+
+	err = datastore.Get(ctx, hunt_key, &hunt)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -241,8 +273,18 @@ func getHuntHandler(c web.C, w http.ResponseWriter, req *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-
 		}
+	}
+
+	mem_item := &memcache.Item{
+		Key:    memcache_key,
+		Object: hunt,
+	}
+
+	err = memcache.JSON.Add(ctx, mem_item)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	R.JSON(w, http.StatusOK, hunt)
@@ -264,6 +306,8 @@ func delAllHuntsHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	//TODO cancellare campi relativi
+
+	memcache.Flush(ctx)
 }
 
 func delHuntHandler(c web.C, w http.ResponseWriter, req *http.Request) {
@@ -279,6 +323,8 @@ func delHuntHandler(c web.C, w http.ResponseWriter, req *http.Request) {
 	}
 
 	//TODO cancellare campi relativi
+
+	memcache.Flush(ctx)
 }
 
 // func newClueHandler(c web.C, w http.ResponseWriter, req *http.Request) {
@@ -353,3 +399,9 @@ func delHuntHandler(c web.C, w http.ResponseWriter, req *http.Request) {
 // 		return
 // 	}
 // }
+
+func cacheFlushHandler(w http.ResponseWriter, req *http.Request) {
+	ctx := appengine.NewContext(req)
+
+	memcache.Flush(ctx)
+}

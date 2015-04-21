@@ -24,6 +24,7 @@ type Clue struct {
 }
 
 type Hunt struct {
+	Key         string `json:"-" datastore:"-"`
 	Id          string `json:"id"`
 	Type        string `json:"type"`
 	DisplayName string `json:"displayName"`
